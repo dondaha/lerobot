@@ -767,6 +767,9 @@ class VLAFlowMatching(nn.Module):
             inference_delay=kwargs.get("inference_delay"),
             prev_chunk_left_over=kwargs.get("prev_chunk_left_over"),
             execution_horizon=kwargs.get("execution_horizon"),
+            # RNDF safety guidance hook: no-op unless an external script sets
+            # `self._safety_guidance_fn` on this module (see safe_vla project).
+            guidance_fn=getattr(self, "_safety_guidance_fn", None),
         )
 
     def denoise_step(

@@ -68,6 +68,7 @@ def euler_integrate(
     inference_delay: int | None = None,
     prev_chunk_left_over: Tensor | None = None,
     execution_horizon: int | None = None,
+    guidance_fn: "Callable[[Tensor, float, int, int], Tensor] | None" = None,
 ) -> Tensor:
     """Forward-Euler integration of a velocity field from t=1 (noise) to t=0 (actions).
 
@@ -115,6 +116,13 @@ def euler_integrate(
             v_t = denoise_step_partial_call(x_t)
 
         x_t = x_t + dt * v_t
+
+        # Optional external guidance (e.g. RNDF safety gradient). Called AFTER the
+        # Euler step with the current denoised sample; returns a correction added
+        # to x_t. Signature: (x_t, time, step, num_steps) -> delta_x (same shape).
+        # No-op when guidance_fn is None, so checkpoints/behaviour are unchanged.
+        if guidance_fn is not None:
+            x_t = x_t + guidance_fn(x_t, time, step, num_steps)
 
         if rtc_processor is not None and rtc_processor.is_debug_enabled():
             rtc_processor.track(time=time, x_t=x_t, v_t=v_t)

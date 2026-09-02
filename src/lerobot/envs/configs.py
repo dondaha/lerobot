@@ -332,6 +332,9 @@ class LiberoEnv(EnvConfig):
     observation_height: int = 360
     observation_width: int = 360
     is_libero_plus: bool = False
+    # 图像是否 180° 翻转（HuggingFaceVLA/libero 约定）。官方模型(lerobot/libero 数据集)需要 True；
+    # droid-ai/libero 微调的关节版模型图像是正朝向，应设 False（2026-08-09 diag_in_dist 实测）。
+    flip_images: bool = True
     features: dict[str, PolicyFeature] = field(
         default_factory=lambda: {
             ACTION: PolicyFeature(type=FeatureType.ACTION, shape=(7,)),
@@ -351,11 +354,17 @@ class LiberoEnv(EnvConfig):
             LIBERO_KEY_PIXELS_EYE_IN_HAND: f"{OBS_IMAGES}.image2",
         }
     )
-    control_mode: str = "relative"  # or "absolute"
+    control_mode: str = "relative"  # or "absolute" or "joint"
 
     def __post_init__(self):
         if self.fps <= 0:
             raise ValueError(f"fps must be positive, got {self.fps}")
+
+        # joint 控制模式下 action 是 8D(7 关节角 + 1 gripper), 其余(EEF delta/absolute)是 7D。
+        # 这个 shape 会经 make_policy 覆盖 policy 的 action head/归一化维度——关节版 smolvla
+        # 输出 8D, 若这里仍是 7D, 会在 unnormalizer 处 "size 7 vs 8" 崩溃。
+        if self.control_mode == "joint":
+            self.features[ACTION] = PolicyFeature(type=FeatureType.ACTION, shape=(8,))
 
         if self.obs_type == "pixels":
             self.features[LIBERO_KEY_PIXELS_AGENTVIEW] = PolicyFeature(
@@ -442,7 +451,7 @@ class LiberoEnv(EnvConfig):
 
     def get_env_processors(self):
         return (
-            PolicyProcessorPipeline(steps=[LiberoProcessorStep()]),
+            PolicyProcessorPipeline(steps=[LiberoProcessorStep(flip_images=self.flip_images)]),
             PolicyProcessorPipeline(steps=[]),
         )
 

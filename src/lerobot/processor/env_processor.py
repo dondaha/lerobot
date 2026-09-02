@@ -44,7 +44,12 @@ class LiberoProcessorStep(ObservationProcessorStep):
     **Image Processing:**
     -   Rotates images by 180 degrees by flipping both height and width dimensions.
     -   This accounts for the HuggingFaceVLA/libero camera orientation convention.
+    -   ``flip_images=False`` 时不做翻转：droid-ai/libero 数据集的图像本身是正朝向，
+        翻转反而造成视觉输入与训练分布错位（2026-08-09 diag_in_dist 实测：
+        flip 后第一步动作误差从 0.038 rad 恶化到 0.09-0.15 rad）。
     """
+
+    flip_images: bool = True
 
     def _process_observation(self, observation):
         """
@@ -55,8 +60,9 @@ class LiberoProcessorStep(ObservationProcessorStep):
             if key.startswith(f"{OBS_IMAGES}."):
                 img = processed_obs[key]
 
-                # Flip both H and W
-                img = torch.flip(img, dims=[2, 3])
+                if self.flip_images:
+                    # Flip both H and W
+                    img = torch.flip(img, dims=[2, 3])
 
                 processed_obs[key] = img
         # Process robot_state into a flat state vector

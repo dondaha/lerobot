@@ -247,9 +247,15 @@ class LiberoEnv(gym.Env):
                 }
             )
 
-        self.action_space = spaces.Box(
-            low=ACTION_LOW, high=ACTION_HIGH, shape=(ACTION_DIM,), dtype=np.float32
-        )
+        # joint 模式动作是 8D(7 绝对关节角 + 1 gripper), 其余(EEF delta)是 7D。
+        # EEF 动作归一化在 [-1,1]; 绝对关节角可超出该范围(如 -2.5rad), 故 joint 模式放宽边界,
+        # 避免任何按 action_space 的裁剪破坏绝对角命令。
+        if self.control_mode == "joint":
+            self.action_space = spaces.Box(low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32)
+        else:
+            self.action_space = spaces.Box(
+                low=ACTION_LOW, high=ACTION_HIGH, shape=(ACTION_DIM,), dtype=np.float32
+            )
 
     def _ensure_env(self) -> None:
         """Create the underlying OffScreenRenderEnv on first use.
@@ -260,14 +266,41 @@ class LiberoEnv(gym.Env):
         """
         if self._env is not None:
             return
-        env = OffScreenRenderEnv(
+        env_kwargs = dict(
             bddl_file_name=self._task_bddl_file,
             camera_heights=self.observation_height,
             camera_widths=self.observation_width,
             control_freq=self.control_freq,
         )
+        # "joint" 模式: 用 robosuite 的 JOINT_POSITION 控制器(control_dim=7 关节 + 1 gripper = 8D),
+        # 供输出关节角的 policy(如关节空间微调的 smolvla)使用。EEF 模式默认 OSC_POSE。
+        if self.control_mode == "joint":
+            env_kwargs["controller"] = "JOINT_POSITION"
+        env = OffScreenRenderEnv(**env_kwargs)
         env.reset()
         self._env = env
+        if self.control_mode == "joint":
+            self._patch_joint_controllers()
+
+    def _patch_joint_controllers(self) -> None:
+        """让 JOINT_POSITION 控制器把动作当成【绝对】关节角(而非默认的 ±0.05rad 增量)。
+
+        关节空间数据集的 action = 绝对 joint_state(见 preprocess_libero_joint.py),
+        而 robosuite JointPositionController.set_goal 默认把输入按 output_max 缩放成增量。
+        这里 monkey-patch 每个机器人的 arm controller.set_goal, 用 set_qpos= 直接设绝对目标。
+        """
+        assert self._env is not None
+        for robot in self._env.robots:
+            ctrl = robot.controller
+
+            def make_abs_set_goal(controller):
+                def abs_set_goal(action, set_qpos=None):
+                    # action 已是 7 维绝对关节角; 直接作为绝对目标, 绕过增量缩放。
+                    return type(controller).set_goal(controller, action, set_qpos=np.asarray(action, dtype=float))
+
+                return abs_set_goal
+
+            ctrl.set_goal = make_abs_set_goal(ctrl)
 
     def render(self):
         self._ensure_env()
@@ -334,6 +367,12 @@ class LiberoEnv(gym.Env):
         super().reset(seed=seed)
         self._env.seed(seed)
         raw_obs = self._env.reset()
+        # LIBERO 用 hard_reset=True: 每次 self._env.reset() 都【重建】机器人+控制器对象,
+        # 会把 _ensure_env 里打的 set_goal monkey-patch 丢掉(实测 reset 后 controller 是新对象、
+        # 未 patch)。必须在这里对新控制器重新打补丁, 否则 joint 模式退回默认的 ±0.05rad 增量
+        # 缩放, 绝对关节角命令失效(表现为跟踪误差随步数发散)。
+        if self.control_mode == "joint":
+            self._patch_joint_controllers()
         if self.init_states and self._init_states is not None:
             raw_obs = self._env.set_init_state(self._init_states[self.init_state_id % len(self._init_states)])
             self.init_state_id += self._reset_stride  # Change init_state_id when reset
@@ -342,7 +381,14 @@ class LiberoEnv(gym.Env):
         # Step the simulator with a no-op action for a few frames so everything settles.
         # Increasing this value can improve determinism and reproducibility across resets.
         for _ in range(self.num_steps_wait):
-            raw_obs, _, _, _ = self._env.step(get_libero_dummy_action())
+            if self.control_mode == "joint":
+                # 关节模式 no-op = 保持当前关节角(8D: 7 绝对角 + gripper 合)。
+                # get_libero_dummy_action() 是 7D EEF 格式, 维度对不上 JOINT_POSITION(8D)。
+                cur_q = np.asarray(self._env.robots[0]._joint_positions, dtype=np.float32)
+                noop = np.concatenate([cur_q, [1.0]]).astype(np.float32)
+                raw_obs, _, _, _ = self._env.step(noop)
+            else:
+                raw_obs, _, _, _ = self._env.step(get_libero_dummy_action())
 
         if self.control_mode == "absolute":
             for robot in self._env.robots:
@@ -350,6 +396,9 @@ class LiberoEnv(gym.Env):
         elif self.control_mode == "relative":
             for robot in self._env.robots:
                 robot.controller.use_delta = True
+        elif self.control_mode == "joint":
+            # JOINT_POSITION 控制器无 use_delta 属性; step() 里直接注入绝对 qpos, 这里无需设置。
+            pass
         else:
             raise ValueError(f"Invalid control mode: {self.control_mode}")
         observation = self._format_raw_obs(raw_obs)
@@ -364,6 +413,12 @@ class LiberoEnv(gym.Env):
                 f"Expected action to be 1-D (shape (action_dim,)), "
                 f"but got shape {action.shape} with ndim={action.ndim}"
             )
+        if self.control_mode == "joint":
+            # 关节模式 action = [7 绝对关节角, 1 gripper]。第 8 维是数据集里的手指 qpos
+            # (≈0 闭合, ≈0.04 张开), robosuite 的 gripper 命令约定是 -1=开 / +1=合(按 sign),
+            # 故按中点阈值映射: 张开→-1, 闭合→+1。前 7 维绝对角由 patch 过的 set_goal 直接注入。
+            action = action.copy()
+            action[7] = -1.0 if action[7] > 0.02 else 1.0
         raw_obs, reward, done, info = self._env.step(action)
 
         is_success = self._env.check_success()
