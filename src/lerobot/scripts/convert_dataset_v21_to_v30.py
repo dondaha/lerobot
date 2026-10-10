@@ -58,6 +58,7 @@ require_package("jsonlines", extra="dataset")
 import jsonlines
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 import tqdm
 from datasets import Dataset, Features, Image
 from huggingface_hub import HfApi, snapshot_download
@@ -186,24 +187,15 @@ def convert_tasks(root, new_root):
 
 
 def concat_data_files(paths_to_cat, new_root, chunk_idx, file_idx, image_keys):
-    # TODO(rcadene): to save RAM use Dataset.from_parquet(file) and concatenate_datasets
-    dataframes = [pd.read_parquet(file) for file in paths_to_cat]
-    # Concatenate all DataFrames along rows
-    concatenated_df = pd.concat(dataframes, ignore_index=True)
-
+    # --- pyarrow-native concat (2026-10-10, safevla-agent) ---
+    # 原实现用 pandas，会把 struct<bytes,path> 图像列物化成 Python 对象（实测 57s/集）。
+    # 本仓库 v2.1 产物的图像列本来就是 HF Image 的 struct<bytes: binary, path: string>，
+    # 所以原来那段 Features/Image() 的 schema 改写是恒等变换，直接省掉。
+    tables = [pq.read_table(file) for file in paths_to_cat]
+    concatenated = pa.concat_tables(tables) if len(tables) > 1 else tables[0]
     path = new_root / DEFAULT_DATA_PATH.format(chunk_index=chunk_idx, file_index=file_idx)
     path.parent.mkdir(parents=True, exist_ok=True)
-
-    if len(image_keys) > 0:
-        schema = pa.Schema.from_pandas(concatenated_df)
-        features = Features.from_arrow_schema(schema)
-        for key in image_keys:
-            features[key] = Image()
-        schema = features.arrow_schema
-    else:
-        schema = None
-
-    concatenated_df.to_parquet(path, index=False, schema=schema)
+    pq.write_table(concatenated, path)
 
 
 def convert_data(root: Path, new_root: Path, data_file_size_in_mb: int):
