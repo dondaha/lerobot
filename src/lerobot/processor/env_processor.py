@@ -44,12 +44,21 @@ class LiberoProcessorStep(ObservationProcessorStep):
     **Image Processing:**
     -   Rotates images by 180 degrees by flipping both height and width dimensions.
     -   This accounts for the HuggingFaceVLA/libero camera orientation convention.
-    -   ``flip_images=False`` 时不做翻转：droid-ai/libero 数据集的图像本身是正朝向，
-        翻转反而造成视觉输入与训练分布错位（2026-08-09 diag_in_dist 实测：
-        flip 后第一步动作误差从 0.038 rad 恶化到 0.09-0.15 rad）。
+
+    ⚠️ ``flip_images`` 必须保持 **True**（base/T01 2026-10-10 复核后更正）：
+    `diag_in_dist` 只能证明"模型期望的是**数据集 PNG 原朝向**"，不能推出 eval 不该翻转——
+    robosuite/LIBERO 渲染出的 agentview 与 droid-ai/libero 的 PNG 朝向**相差 180°**
+    （见 `LiberoEnv.render()` 与 `gt_joint_replay._candidate_features` 里都对渲染图做
+    `[::-1, ::-1]` 才对齐数据集），所以 processor 翻一次恰好回到训练朝向。
+    2026-08-09 实测：`--env.flip_images=false` 重跑 eval 成功率 **0%**。
+    独立复核脚本：`safe_vla/scripts/diagnostics/check_image_orientation.py`。
     """
 
     flip_images: bool = True
+    # "eef":   state = [eef_pos(3), axis_angle(3), gripper_qpos(2)]  (HuggingFaceVLA/lerobot 约定)
+    # "joint": state = [joint_pos(7), gripper_qpos[:, :1](1)]        (关节空间基座用;
+    #          语义与 scripts/data/preprocess_libero_joint_v2.py 写出的 observation.state 一致)
+    state_mode: str = "eef"
 
     def _process_observation(self, observation):
         """
@@ -75,10 +84,17 @@ class LiberoProcessorStep(ObservationProcessorStep):
             eef_quat = robot_state["eef"]["quat"]  # (B, 4,)
             gripper_qpos = robot_state["gripper"]["qpos"]  # (B, 2,)
 
-            # Convert quaternion to axis-angle
-            eef_axisangle = self._quat2axisangle(eef_quat)  # (B, 3)
-            # Concatenate into a single state vector
-            state = torch.cat((eef_pos, eef_axisangle, gripper_qpos), dim=-1)
+            if self.state_mode == "joint":
+                # 关节空间基座: 本体感受 = 7 关节角 + 1 夹爪 qpos (与 action 同语义)
+                joint_pos = robot_state["joints"]["pos"]  # (B, 7)
+                state = torch.cat(
+                    (joint_pos.float(), gripper_qpos[..., :1].float()), dim=-1
+                )
+            else:
+                # Convert quaternion to axis-angle
+                eef_axisangle = self._quat2axisangle(eef_quat)  # (B, 3)
+                # Concatenate into a single state vector
+                state = torch.cat((eef_pos, eef_axisangle, gripper_qpos), dim=-1)
 
             # ensure float32
             state = state.float()

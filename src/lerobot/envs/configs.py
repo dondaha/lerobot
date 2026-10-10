@@ -332,8 +332,11 @@ class LiberoEnv(EnvConfig):
     observation_height: int = 360
     observation_width: int = 360
     is_libero_plus: bool = False
-    # 图像是否 180° 翻转（HuggingFaceVLA/libero 约定）。官方模型(lerobot/libero 数据集)需要 True；
-    # droid-ai/libero 微调的关节版模型图像是正朝向，应设 False（2026-08-09 diag_in_dist 实测）。
+    # 图像是否 180° 翻转。**一律保持 True**（HuggingFaceVLA/lerobot 与 droid-ai/libero 都适用）：
+    # 环境渲染图与数据集 PNG 朝向相反，processor 翻一次回到训练朝向。
+    # 2026-08-09 实测 flip_images=False → eval 成功率 0%（不是 25%/37%）；
+    # 2026-10-10 base/T01 用 scripts/diagnostics/check_image_orientation.py 独立复核。
+    # 旧注释误写"关节版应设 False"，已更正，勿再照改。
     flip_images: bool = True
     features: dict[str, PolicyFeature] = field(
         default_factory=lambda: {
@@ -355,6 +358,9 @@ class LiberoEnv(EnvConfig):
         }
     )
     control_mode: str = "relative"  # or "absolute" or "joint"
+    # 本体感受 state 语义: "eef" = [eef_pos(3), axis_angle(3), gripper(2)];
+    # "joint" = [joint_pos(7), gripper_qpos[0](1)]，用于关节空间基座。
+    state_mode: str = "eef"
 
     def __post_init__(self):
         if self.fps <= 0:
@@ -451,7 +457,9 @@ class LiberoEnv(EnvConfig):
 
     def get_env_processors(self):
         return (
-            PolicyProcessorPipeline(steps=[LiberoProcessorStep(flip_images=self.flip_images)]),
+            PolicyProcessorPipeline(
+                steps=[LiberoProcessorStep(flip_images=self.flip_images, state_mode=self.state_mode)]
+            ),
             PolicyProcessorPipeline(steps=[]),
         )
 
