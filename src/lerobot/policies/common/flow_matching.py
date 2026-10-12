@@ -22,7 +22,9 @@ denoising loop (with its real-time-chunking hook) that the openpi-derived polici
 stateless; adopting them does not affect checkpoints.
 """
 
+import inspect
 from collections.abc import Callable
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import torch
@@ -56,6 +58,22 @@ def sample_time_beta(bsize: int, device, *, alpha: float, beta: float, scale: fl
     time_beta = sample_beta(alpha, beta, bsize, device)
     time = time_beta * scale + offset
     return time.to(dtype=torch.float32, device=device)
+
+
+@lru_cache(maxsize=None)
+def _guidance_accepts_ctx(fn) -> bool:
+    """外部 guidance hook 是否接受 (v_t, dt, denoise_fn) 上下文（method/T01 起新增）。
+
+    旧 hook 签名是 (x_t, time, step, num_steps)；新 hook 用 **kwargs 收上下文。
+    这里按签名判断一次并缓存，避免每步 try/except。
+    """
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return True
+    return "v_t" in params
 
 
 def euler_integrate(
@@ -122,7 +140,18 @@ def euler_integrate(
         # to x_t. Signature: (x_t, time, step, num_steps) -> delta_x (same shape).
         # No-op when guidance_fn is None, so checkpoints/behaviour are unchanged.
         if guidance_fn is not None:
-            x_t = x_t + guidance_fn(x_t, time, step, num_steps)
+            if _guidance_accepts_ctx(guidance_fn):
+                x_t = x_t + guidance_fn(
+                    x_t,
+                    time,
+                    step,
+                    num_steps,
+                    v_t=v_t,
+                    dt=dt,
+                    denoise_fn=denoise_step_partial_call,
+                )
+            else:
+                x_t = x_t + guidance_fn(x_t, time, step, num_steps)
 
         if rtc_processor is not None and rtc_processor.is_debug_enabled():
             rtc_processor.track(time=time, x_t=x_t, v_t=v_t)
