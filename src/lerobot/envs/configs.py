@@ -361,6 +361,16 @@ class LiberoEnv(EnvConfig):
     # 本体感受 state 语义: "eef" = [eef_pos(3), axis_angle(3), gripper(2)];
     # "joint" = [joint_pos(7), gripper_qpos[0](1)]，用于关节空间基座。
     state_mode: str = "eef"
+    # ★ 关节模式下第 8 维（下一帧手指 qpos）如何反解成 robosuite 夹爪命令。
+    # "threshold": q > 0.02 → 开(-1)，否则 合(+1)。**系统性地把命令推迟 ~5 帧**
+    #   （手指要走完 0.04→0.02 才被判到），实测会与 PD 的跟踪滞后互相抵消，
+    #   导致"控制器越准成功率越低"的假象（base/T02 §3/§5）。
+    # "velocity"（推荐）: 用 Δq 的符号 + 死区，手指一动就切命令；
+    #   gripper_lead 补偿"检测运动起点比真实命令晚 ~1 帧"。
+    # 详见 docs/JOINT_CONTROL_PROTOCOL.md。
+    gripper_mode: str = "threshold"  # or "velocity"
+    gripper_eps: float = 2e-3
+    gripper_lead: int = 0
 
     def __post_init__(self):
         if self.fps <= 0:
@@ -431,6 +441,10 @@ class LiberoEnv(EnvConfig):
             "observation_height": self.observation_height,
             "observation_width": self.observation_width,
             "control_freq": self.fps,
+            # 关节模式夹爪反解（见 docs/JOINT_CONTROL_PROTOCOL.md §3）
+            "gripper_mode": self.gripper_mode,
+            "gripper_eps": self.gripper_eps,
+            "gripper_lead": self.gripper_lead,
         }
         if self.task_ids is not None:
             kwargs["task_ids"] = self.task_ids

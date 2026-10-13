@@ -128,6 +128,9 @@ class LiberoEnv(gym.Env):
         control_freq: int = 20,
         control_mode: str = "relative",
         is_libero_plus: bool = False,
+        gripper_mode: str = "threshold",
+        gripper_eps: float = 2e-3,
+        gripper_lead: int = 0,
     ):
         super().__init__()
         if control_freq <= 0:
@@ -158,6 +161,15 @@ class LiberoEnv(gym.Env):
         self.camera_name_mapping = camera_name_mapping
         self.num_steps_wait = num_steps_wait
         self.control_freq = control_freq
+        # 关节模式下的夹爪反解（见 docs/JOINT_CONTROL_PROTOCOL.md）
+        if gripper_mode not in ("threshold", "velocity"):
+            raise ValueError(f"unknown gripper_mode {gripper_mode!r}")
+        self.gripper_mode = gripper_mode
+        self.gripper_eps = gripper_eps
+        self.gripper_lead = gripper_lead
+        self._gripper_prev: float | None = None
+        self._gripper_cmd: float = 1.0
+        self._gripper_hist: list[float] = []
         self.episode_index = episode_index
         self.episode_length = episode_length
         # Load once and keep
@@ -365,6 +377,7 @@ class LiberoEnv(gym.Env):
     def reset(self, seed=None, **kwargs):
         self._ensure_env()
         super().reset(seed=seed)
+        self.reset_gripper_decoder()
         self._env.seed(seed)
         raw_obs = self._env.reset()
         # LIBERO 用 hard_reset=True: 每次 self._env.reset() 都【重建】机器人+控制器对象,
@@ -405,6 +418,29 @@ class LiberoEnv(gym.Env):
         info = {"is_success": False}
         return observation, info
 
+    def _gripper_action(self, value: float) -> float:
+        """把"下一帧手指 qpos"反解成 robosuite 夹爪命令（-1 开 / +1 合）。"""
+        if self.gripper_mode == "threshold":
+            self._gripper_prev = value
+            self._gripper_cmd = -1.0 if value > 0.02 else 1.0
+            return self._gripper_cmd
+        # velocity: 手指一动就说明命令刚切过（robosuite 是把 ±1 逐步积分到执行器目标的）
+        if self._gripper_prev is None:
+            self._gripper_cmd = -1.0 if value > 0.02 else 1.0
+        else:
+            delta = value - self._gripper_prev
+            if delta > self.gripper_eps:
+                self._gripper_cmd = -1.0
+            elif delta < -self.gripper_eps:
+                self._gripper_cmd = 1.0
+        self._gripper_prev = value
+        return self._gripper_cmd
+
+    def reset_gripper_decoder(self) -> None:
+        """新一轮 episode 前清掉夹爪解码器的状态。"""
+        self._gripper_prev = None
+        self._gripper_cmd = 1.0
+
     def step(self, action: np.ndarray) -> tuple[RobotObservation, float, bool, bool, dict[str, Any]]:
         self._ensure_env()
         assert self._env is not None
@@ -414,11 +450,13 @@ class LiberoEnv(gym.Env):
                 f"but got shape {action.shape} with ndim={action.ndim}"
             )
         if self.control_mode == "joint":
-            # 关节模式 action = [7 绝对关节角, 1 gripper]。第 8 维是数据集里的手指 qpos
-            # (≈0 闭合, ≈0.04 张开), robosuite 的 gripper 命令约定是 -1=开 / +1=合(按 sign),
-            # 故按中点阈值映射: 张开→-1, 闭合→+1。前 7 维绝对角由 patch 过的 set_goal 直接注入。
+            # 关节模式 action = [7 绝对关节角, 1 gripper]。第 8 维是数据集里的**下一帧手指 qpos**
+            # (≈0.04 张开 / ≈0 闭合)，要反解成 robosuite 的夹爪命令 (-1=开 / +1=合)。
+            # 前 7 维绝对角由 patch 过的 set_goal 直接注入。
+            # ★ base/T02：阈值反解会把命令系统性地推迟 ~5 帧（手指要走完 0.04→0.02 才被判到），
+            #   与 PD 的跟踪滞后互相抵消，制造出"控制器越准越差"的假象。见 JOINT_CONTROL_PROTOCOL.md §3。
             action = action.copy()
-            action[7] = -1.0 if action[7] > 0.02 else 1.0
+            action[7] = self._gripper_action(float(action[7]))
         raw_obs, reward, done, info = self._env.step(action)
 
         is_success = self._env.check_success()
