@@ -53,6 +53,7 @@ policy = SmolVLAPolicy.from_pretrained("lerobot/smolvla_base")
 """
 
 import math
+import os
 from collections import deque
 from typing import TypedDict, Unpack
 
@@ -296,6 +297,13 @@ class SmolVLAPolicy(PreTrainedPolicy):
         actions_is_pad = batch.get("action_is_pad")
         loss_dict = {}
         losses = self.model.forward(images, img_masks, lang_tokens, lang_masks, state, actions, noise, time)
+        # ---- safe_vla method/T02 Part C: x̂₁ 能量正则项（未装 hook 时为 None）----
+        reg_term = None
+        if getattr(self.model, "_sv_energy_reg", None) is not None:
+            last = getattr(self.model, "_sv_last_fm", None)
+            if last is not None:
+                reg_term = self.model._sv_energy_reg(last[0], last[1], last[2], batch)
+                self.model._sv_last_fm = None
         original_action_dim = self.config.action_feature.shape[0]
         losses = losses[:, :, :original_action_dim]
         loss_dict["losses_after_forward"] = losses.clone().mean().item()
@@ -316,6 +324,9 @@ class SmolVLAPolicy(PreTrainedPolicy):
             else:
                 num_valid = ((~actions_is_pad).sum(dim=1) * losses.shape[-1]).clamp_min(1)
                 per_sample_loss = losses.sum(dim=(1, 2)) / num_valid
+            if reg_term is not None:
+                per_sample_loss = per_sample_loss + reg_term
+                loss_dict["loss_energy"] = float(reg_term.detach().mean().item())
             loss_dict["loss"] = per_sample_loss.mean().item()
             return per_sample_loss, loss_dict
         else:
@@ -325,6 +336,9 @@ class SmolVLAPolicy(PreTrainedPolicy):
             else:
                 num_valid = ((~actions_is_pad).sum() * losses.shape[-1]).clamp_min(1)
                 loss = losses.sum() / num_valid
+            if reg_term is not None:
+                loss = loss + reg_term.mean()
+                loss_dict["loss_energy"] = float(reg_term.detach().mean().item())
             loss_dict["loss"] = loss.item()
             return loss, loss_dict
 
@@ -718,6 +732,13 @@ class VLAFlowMatching(nn.Module):
         suffix_out = suffix_out.to(dtype=torch.float32)
         v_t = self.action_out_proj(suffix_out)
         losses = F.mse_loss(u_t, v_t, reduction="none")
+        # ---- safe_vla method/T02 Part C: 暴露 (x_t, v_t, time) 给可选的 x̂₁ 能量正则 ----
+        # 默认零影响：只有 SAFE_ENERGY_REG_CFG 环境变量存在（或外部显式装 hook）时才生效。
+        if getattr(self, "_sv_energy_reg", None) is None and os.environ.get("SAFE_ENERGY_REG_CFG"):
+            from safe_vla.train.energy_regularizer import install_energy_hook_from_env
+            install_energy_hook_from_env(self)
+        if getattr(self, "_sv_energy_reg", None) is not None:
+            self._sv_last_fm = (x_t, v_t, time)
         return losses
 
     def sample_actions(
