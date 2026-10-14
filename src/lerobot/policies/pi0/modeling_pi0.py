@@ -700,6 +700,8 @@ class PI0Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             inference_delay=kwargs.get("inference_delay"),
             prev_chunk_left_over=kwargs.get("prev_chunk_left_over"),
             execution_horizon=kwargs.get("execution_horizon"),
+            # 与 SmolVLA / π0.5 统一的引导接线（base/T02）：未挂载时 no-op。
+            guidance_fn=getattr(self, "_safety_guidance_fn", None),
         )
 
     def denoise_step(

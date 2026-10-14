@@ -666,6 +666,9 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             inference_delay=kwargs.get("inference_delay"),
             prev_chunk_left_over=kwargs.get("prev_chunk_left_over"),
             execution_horizon=kwargs.get("execution_horizon"),
+            # 外部安全引导（RNDF 等）：在每个去噪步的 Euler 更新之后注入修正。
+            # 未挂载时 None ⇒ 完全 no-op，不改变 checkpoint 原行为（base/T02 任务 2 要求）。
+            guidance_fn=getattr(self, "_safety_guidance_fn", None),
         )
 
     def denoise_step(
