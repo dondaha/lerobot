@@ -99,6 +99,9 @@ class TrainPipelineConfig(HubMixin):
     # Number of workers for the dataloader.
     num_workers: int = 4
     batch_size: int = 8
+    # 梯度累积：一个 optimizer step 消费 gradient_accumulation_steps 个 micro-batch。
+    # 默认 1 = 与以前完全一致（不改变任何既有训练的行为）；显存不够又想跑大 batch 时用它。
+    gradient_accumulation_steps: int = 1
     prefetch_factor: int = 4
     persistent_workers: bool = True
     steps: int = 100_000

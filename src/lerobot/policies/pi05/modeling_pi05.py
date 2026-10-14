@@ -669,6 +669,8 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             # 外部安全引导（RNDF 等）：在每个去噪步的 Euler 更新之后注入修正。
             # 未挂载时 None ⇒ 完全 no-op，不改变 checkpoint 原行为（base/T02 任务 2 要求）。
             guidance_fn=getattr(self, "_safety_guidance_fn", None),
+            # delta 动作协议：hook 需要 chunk 起点的本体感受才能把 delta 还原成绝对量
+            action_offset=getattr(self, "_action_offset", None),
         )
 
     def denoise_step(

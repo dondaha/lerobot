@@ -374,10 +374,18 @@ class LiberoEnv(EnvConfig):
     # hysteresis 模式的两个电平（手指行程约 0.04）
     gripper_close_level: float = 0.032
     gripper_open_level: float = 0.008
+    # ★ 闭环关节控制协议（D24，全组唯一实现，见 lerobot/envs/joint_protocol.py）：
+    #   "v0" = robosuite 原生 JOINT_POSITION（PD, kp=50, ζ=1）+ 绝对目标注入。
+    #          T01/T02 的全部闭环数字都是这个协议，必须逐比特可复现。
+    #   "v1" = v0 + 参考轨迹前馈（v_clip=4 rad/s、a_clip=200 rad/s²；kp/kd 不变）。
+    #          诊断脚本 joint_ctrl_lab.py 的 ff_velacc 预设与它逐行一致。
+    joint_protocol: str = "v0"  # or "v1"
 
     def __post_init__(self):
         if self.fps <= 0:
             raise ValueError(f"fps must be positive, got {self.fps}")
+        if self.joint_protocol not in ("v0", "v1"):
+            raise ValueError(f"joint_protocol must be 'v0' or 'v1', got {self.joint_protocol!r}")
 
         # joint 控制模式下 action 是 8D(7 关节角 + 1 gripper), 其余(EEF delta/absolute)是 7D。
         # 这个 shape 会经 make_policy 覆盖 policy 的 action head/归一化维度——关节版 smolvla
@@ -450,6 +458,8 @@ class LiberoEnv(EnvConfig):
             "gripper_lead": self.gripper_lead,
             "gripper_close_level": self.gripper_close_level,
             "gripper_open_level": self.gripper_open_level,
+            # 闭环关节协议（v0/v1）
+            "joint_protocol": self.joint_protocol,
         }
         if self.task_ids is not None:
             kwargs["task_ids"] = self.task_ids

@@ -791,6 +791,8 @@ class VLAFlowMatching(nn.Module):
             # RNDF safety guidance hook: no-op unless an external script sets
             # `self._safety_guidance_fn` on this module (see safe_vla project).
             guidance_fn=getattr(self, "_safety_guidance_fn", None),
+            # delta 动作协议：hook 需要 chunk 起点的本体感受才能把 delta 还原成绝对量
+            action_offset=getattr(self, "_action_offset", None),
         )
 
     def denoise_step(

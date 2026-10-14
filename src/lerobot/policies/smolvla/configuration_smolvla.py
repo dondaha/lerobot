@@ -56,6 +56,13 @@ class SmolVLAConfig(PreTrainedConfig):
     # Gripper dimensions will remain in absolute values.
     use_delta_joint_actions_aloha: bool = False
 
+    # ★ base/T03 Part B：通用的"相对动作"开关（对齐 openpi DeltaActions，与 pi0/pi05 同一套实现）。
+    #   action = action − state（chunk 起点），exclude_joints 里的维度保持绝对（默认夹爪）。
+    #   与 use_delta_joint_actions_aloha 的区别：后者是 Aloha 专用的手写实现，这里是通用 processor。
+    use_relative_actions: bool = False
+    relative_exclude_joints: list[str] = field(default_factory=lambda: ["gripper"])
+    action_feature_names: list[str] | None = None
+
     # Tokenizer
     tokenizer_max_length: int = 48
 

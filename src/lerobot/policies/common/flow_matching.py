@@ -87,8 +87,13 @@ def euler_integrate(
     prev_chunk_left_over: Tensor | None = None,
     execution_horizon: int | None = None,
     guidance_fn: "Callable[[Tensor, float, int, int], Tensor] | None" = None,
+    action_offset: Tensor | None = None,
 ) -> Tensor:
     """Forward-Euler integration of a velocity field from t=1 (noise) to t=0 (actions).
+
+    ``action_offset``：**delta 动作协议**下每个 chunk 的参考点（chunk 起点的本体感受，
+    物理单位）。v1/绝对关节协议下为 None。hook 若在签名里声明了 ``action_offset``
+    （或带 ``**kwargs``）就会收到它，用来把"delta"还原成绝对量（见 docs/GUIDANCE_HOOK.md）。
 
     This is the openpi sampling loop: ``dt = -1/num_steps``, ``time = 1.0 + step*dt``,
     ``x_t <- x_t + dt * v_t``, with the optional real-time-chunking (RTC) guidance hook
@@ -149,6 +154,7 @@ def euler_integrate(
                     v_t=v_t,
                     dt=dt,
                     denoise_fn=denoise_step_partial_call,
+                    action_offset=action_offset,
                 )
             else:
                 x_t = x_t + guidance_fn(x_t, time, step, num_steps)

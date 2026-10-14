@@ -19,7 +19,9 @@ from typing import Any
 import torch
 
 from lerobot.processor import (
+    AbsoluteActionsProcessorStep,
     NewLineTaskProcessorStep,
+    RelativeActionsProcessorStep,
     PolicyAction,
     PolicyProcessorPipeline,
     TokenizerProcessorStep,
@@ -62,6 +64,13 @@ def make_smolvla_pre_post_processors(
 
     steps = make_default_policy_processor_steps(config, dataset_stats)
 
+    # base/T03 Part B：通用相对动作（openpi DeltaActions 口径，与 pi0/pi05 同一套 processor）
+    relative_step = RelativeActionsProcessorStep(
+        enabled=getattr(config, "use_relative_actions", False),
+        exclude_joints=getattr(config, "relative_exclude_joints", []),
+        action_names=getattr(config, "action_feature_names", None),
+    )
+
     input_steps = [
         steps.rename_observations,  # To mimic the same processor as pretrained one
         steps.add_batch_dim,
@@ -73,10 +82,13 @@ def make_smolvla_pre_post_processors(
             max_length=config.tokenizer_max_length,
         ),
         steps.to_device,
+        relative_step,
         steps.normalize,
     ]
     output_steps = [
         steps.unnormalize,
+        AbsoluteActionsProcessorStep(enabled=getattr(config, "use_relative_actions", False),
+                                     relative_step=relative_step),
         steps.to_cpu,
     ]
     return make_policy_processor_pipelines(input_steps=input_steps, output_steps=output_steps)

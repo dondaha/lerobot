@@ -133,6 +133,7 @@ class LiberoEnv(gym.Env):
         gripper_lead: int = 0,
         gripper_close_level: float = 0.032,
         gripper_open_level: float = 0.008,
+        joint_protocol: str = "v0",
     ):
         super().__init__()
         if control_freq <= 0:
@@ -166,6 +167,12 @@ class LiberoEnv(gym.Env):
         # 关节模式下的夹爪反解（见 docs/JOINT_CONTROL_PROTOCOL.md）
         if gripper_mode not in ("threshold", "velocity", "hysteresis"):
             raise ValueError(f"unknown gripper_mode {gripper_mode!r}")
+        # 闭环关节协议（D24）：v0 = 纯 PD（T01/T02 事实协议，逐比特可复现）；
+        # v1 = 参考前馈。实现见 lerobot/envs/joint_protocol.py。
+        if joint_protocol not in ("v0", "v1"):
+            raise ValueError(f"unknown joint_protocol {joint_protocol!r}; expected 'v0' or 'v1'")
+        self.joint_protocol = joint_protocol
+        self._joint_protocol_dt = 1.0 / float(control_freq)
         self.gripper_mode = gripper_mode
         self.gripper_eps = gripper_eps
         self.gripper_lead = gripper_lead
@@ -299,24 +306,19 @@ class LiberoEnv(gym.Env):
             self._patch_joint_controllers()
 
     def _patch_joint_controllers(self) -> None:
-        """让 JOINT_POSITION 控制器把动作当成【绝对】关节角(而非默认的 ±0.05rad 增量)。
+        """给 JOINT_POSITION 控制器打关节协议补丁（v0 = 绝对目标；v1 = 绝对目标 + 参考前馈）。
 
         关节空间数据集的 action = 绝对 joint_state(见 preprocess_libero_joint.py),
         而 robosuite JointPositionController.set_goal 默认把输入按 output_max 缩放成增量。
-        这里 monkey-patch 每个机器人的 arm controller.set_goal, 用 set_qpos= 直接设绝对目标。
+        协议实现集中在 `lerobot/envs/joint_protocol.py`（D24：全组唯一实现）。
         """
         assert self._env is not None
+        from lerobot.envs.joint_protocol import attach, reset_protocol_state
+
+        dt = 1.0 / float(self.control_freq)
         for robot in self._env.robots:
-            ctrl = robot.controller
-
-            def make_abs_set_goal(controller):
-                def abs_set_goal(action, set_qpos=None):
-                    # action 已是 7 维绝对关节角; 直接作为绝对目标, 绕过增量缩放。
-                    return type(controller).set_goal(controller, action, set_qpos=np.asarray(action, dtype=float))
-
-                return abs_set_goal
-
-            ctrl.set_goal = make_abs_set_goal(ctrl)
+            attach(robot, self.joint_protocol, dt)
+            reset_protocol_state(robot)
 
     def render(self):
         self._ensure_env()

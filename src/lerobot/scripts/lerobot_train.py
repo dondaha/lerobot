@@ -81,6 +81,8 @@ def update_policy(
     lr_scheduler=None,
     lock=None,
     sample_weighter=None,
+    accum_steps: int = 1,
+    micro_idx: int = 0,
 ) -> tuple[MetricsTracker, dict | None]:
     """
     Performs a single training step to update the policy's weights.
@@ -140,32 +142,39 @@ def update_policy(
 
         # TODO(rcadene): policy.unnormalize_outputs(out_dict)
 
-    # Use accelerator's backward method
+    # 梯度累积：micro-batch 的 loss 要除以累积步数，梯度的尺度才等价于大 batch
+    loss = loss / max(1, accum_steps)
+
+    # Use accelerator's backward method（累积期间只累加梯度，不 step）
     accelerator.backward(loss)
 
-    # Clip gradients if specified
-    if grad_clip_norm > 0:
-        grad_norm = accelerator.clip_grad_norm_(policy.parameters(), grad_clip_norm)
+    is_sync_step = (micro_idx + 1) % max(1, accum_steps) == 0
+    if is_sync_step:
+        # Clip gradients if specified
+        if grad_clip_norm > 0:
+            grad_norm = accelerator.clip_grad_norm_(policy.parameters(), grad_clip_norm)
+        else:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                policy.parameters(), float("inf"), error_if_nonfinite=False
+            )
+
+        # Optimizer step
+        with lock if lock is not None else nullcontext():
+            optimizer.step()
+
+        optimizer.zero_grad()
+
+        # Step through pytorch scheduler at every optimizer step instead of epoch
+        if lr_scheduler is not None:
+            lr_scheduler.step()
+
+        # Update internal buffers if policy has update method
+        if has_method(accelerator.unwrap_model(policy, keep_fp32_wrapper=True), "update"):
+            accelerator.unwrap_model(policy, keep_fp32_wrapper=True).update()
     else:
-        grad_norm = torch.nn.utils.clip_grad_norm_(
-            policy.parameters(), float("inf"), error_if_nonfinite=False
-        )
+        grad_norm = torch.tensor(float("nan"))
 
-    # Optimizer step
-    with lock if lock is not None else nullcontext():
-        optimizer.step()
-
-    optimizer.zero_grad()
-
-    # Step through pytorch scheduler at every batch instead of epoch
-    if lr_scheduler is not None:
-        lr_scheduler.step()
-
-    # Update internal buffers if policy has update method
-    if has_method(accelerator.unwrap_model(policy, keep_fp32_wrapper=True), "update"):
-        accelerator.unwrap_model(policy, keep_fp32_wrapper=True).update()
-
-    train_metrics.loss = loss.item()
+    train_metrics.loss = loss.item() * max(1, accum_steps)
     train_metrics.grad_norm = grad_norm.item()
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
@@ -543,7 +552,8 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
         train_metrics["gpu_mem_gb"] = AverageMeter("mem_gb", ":.2f", reduction="max")
 
     # Keep global batch size for logging; MetricsTracker handles world size internally.
-    effective_batch_size = cfg.batch_size * accelerator.num_processes
+    effective_batch_size = (cfg.batch_size * accelerator.num_processes
+                           * max(1, int(getattr(cfg, "gradient_accumulation_steps", 1))))
     train_tracker = MetricsTracker(
         cfg.batch_size,
         dataset.num_frames,
@@ -566,25 +576,31 @@ def train(cfg: TrainPipelineConfig, accelerator: "Accelerator | None" = None):
             f"Start offline training on a fixed dataset, with effective batch size: {effective_batch_size}"
         )
 
+    accum_steps = max(1, int(getattr(cfg, "gradient_accumulation_steps", 1)))
     for _ in range(step, cfg.steps):
-        start_time = time.perf_counter()
-        batch = next(dl_iter)
-        for cam_key in dataset.meta.camera_keys:
-            if cam_key in batch and batch[cam_key].dtype == torch.uint8:
-                batch[cam_key] = batch[cam_key].to(dtype=torch.float32) / 255.0
-        batch = preprocessor(batch)
-        train_tracker.dataloading_s = time.perf_counter() - start_time
+        dataloading_s = 0.0
+        for micro_idx in range(accum_steps):
+            start_time = time.perf_counter()
+            batch = next(dl_iter)
+            for cam_key in dataset.meta.camera_keys:
+                if cam_key in batch and batch[cam_key].dtype == torch.uint8:
+                    batch[cam_key] = batch[cam_key].to(dtype=torch.float32) / 255.0
+            batch = preprocessor(batch)
+            dataloading_s += time.perf_counter() - start_time
 
-        train_tracker, _ = update_policy(
-            train_tracker,
-            policy,
-            batch,
-            optimizer,
-            cfg.optimizer.grad_clip_norm,
-            accelerator=accelerator,
-            lr_scheduler=lr_scheduler,
-            sample_weighter=sample_weighter,
-        )
+            train_tracker, _ = update_policy(
+                train_tracker,
+                policy,
+                batch,
+                optimizer,
+                cfg.optimizer.grad_clip_norm,
+                accelerator=accelerator,
+                lr_scheduler=lr_scheduler,
+                sample_weighter=sample_weighter,
+                accum_steps=accum_steps,
+                micro_idx=micro_idx,
+            )
+        train_tracker.dataloading_s = dataloading_s
 
         # Note: eval and checkpoint happens *after* the `step`th training update has completed, so we
         # increment `step` here.
