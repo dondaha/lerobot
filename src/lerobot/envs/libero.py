@@ -131,6 +131,8 @@ class LiberoEnv(gym.Env):
         gripper_mode: str = "threshold",
         gripper_eps: float = 2e-3,
         gripper_lead: int = 0,
+        gripper_close_level: float = 0.032,
+        gripper_open_level: float = 0.008,
     ):
         super().__init__()
         if control_freq <= 0:
@@ -162,11 +164,13 @@ class LiberoEnv(gym.Env):
         self.num_steps_wait = num_steps_wait
         self.control_freq = control_freq
         # 关节模式下的夹爪反解（见 docs/JOINT_CONTROL_PROTOCOL.md）
-        if gripper_mode not in ("threshold", "velocity"):
+        if gripper_mode not in ("threshold", "velocity", "hysteresis"):
             raise ValueError(f"unknown gripper_mode {gripper_mode!r}")
         self.gripper_mode = gripper_mode
         self.gripper_eps = gripper_eps
         self.gripper_lead = gripper_lead
+        self.gripper_close_level = gripper_close_level
+        self.gripper_open_level = gripper_open_level
         self._gripper_prev: float | None = None
         self._gripper_cmd: float = 1.0
         self._gripper_hist: list[float] = []
@@ -423,6 +427,15 @@ class LiberoEnv(gym.Env):
         if self.gripper_mode == "threshold":
             self._gripper_prev = value
             self._gripper_cmd = -1.0 if value > 0.02 else 1.0
+            return self._gripper_cmd
+        if self.gripper_mode == "hysteresis":
+            # 迟滞阈值：`q>0.02` 的幅值判据（抗策略噪声）+ 提前 ~3 帧切命令
+            # （手指过渡段约 0.004/帧，所以把"合"的门槛抬到 0.032）。
+            self._gripper_prev = value
+            if value < self.gripper_close_level:
+                self._gripper_cmd = 1.0
+            elif value > self.gripper_open_level:
+                self._gripper_cmd = -1.0
             return self._gripper_cmd
         # velocity: 手指一动就说明命令刚切过（robosuite 是把 ±1 逐步积分到执行器目标的）
         if self._gripper_prev is None:

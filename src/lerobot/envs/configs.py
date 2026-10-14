@@ -368,9 +368,12 @@ class LiberoEnv(EnvConfig):
     # "velocity"（推荐）: 用 Δq 的符号 + 死区，手指一动就切命令；
     #   gripper_lead 补偿"检测运动起点比真实命令晚 ~1 帧"。
     # 详见 docs/JOINT_CONTROL_PROTOCOL.md。
-    gripper_mode: str = "threshold"  # or "velocity"
+    gripper_mode: str = "threshold"  # or "velocity" / "hysteresis"
     gripper_eps: float = 2e-3
     gripper_lead: int = 0
+    # hysteresis 模式的两个电平（手指行程约 0.04）
+    gripper_close_level: float = 0.032
+    gripper_open_level: float = 0.008
 
     def __post_init__(self):
         if self.fps <= 0:
@@ -445,6 +448,8 @@ class LiberoEnv(EnvConfig):
             "gripper_mode": self.gripper_mode,
             "gripper_eps": self.gripper_eps,
             "gripper_lead": self.gripper_lead,
+            "gripper_close_level": self.gripper_close_level,
+            "gripper_open_level": self.gripper_open_level,
         }
         if self.task_ids is not None:
             kwargs["task_ids"] = self.task_ids
