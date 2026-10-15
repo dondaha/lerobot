@@ -51,11 +51,16 @@ def to_relative_actions(actions: Tensor, state: Tensor, mask: Sequence[bool]) ->
     # DeviceProcessorStep moves the transition, so it can be on CPU while actions are on CUDA.
     if state.device != actions.device or state.dtype != actions.dtype:
         state = state.to(device=actions.device, dtype=actions.dtype)
+    # ★ SmolVLA 的 observation.state 可能是 (B, T, D)（n_obs_steps 维）；相对参考点取最后一步，
+    #   否则 state_offset 会变成 4 维，和 (B, T, A) 的 action 广播失败
+    #   （实测报错：output with shape [32, 50, 8] doesn't match the broadcast shape [32, 32, 50, 8]）。
+    if state.ndim == 3:
+        state = state[:, -1]
     state_offset = state[..., :dims] * mask_t
     if actions.ndim == 3:
         state_offset = state_offset.unsqueeze(-2)
     actions = actions.clone()
-    actions[..., :dims] -= state_offset
+    actions[..., :dims] = actions[..., :dims] - state_offset
     return actions
 
 
@@ -73,11 +78,16 @@ def to_absolute_actions(actions: Tensor, state: Tensor, mask: Sequence[bool]) ->
     # DeviceProcessorStep moves the transition, so it can be on CPU while actions are on CUDA.
     if state.device != actions.device or state.dtype != actions.dtype:
         state = state.to(device=actions.device, dtype=actions.dtype)
+    # ★ SmolVLA 的 observation.state 可能是 (B, T, D)（n_obs_steps 维）；相对参考点取最后一步，
+    #   否则 state_offset 会变成 4 维，和 (B, T, A) 的 action 广播失败
+    #   （实测报错：output with shape [32, 50, 8] doesn't match the broadcast shape [32, 32, 50, 8]）。
+    if state.ndim == 3:
+        state = state[:, -1]
     state_offset = state[..., :dims] * mask_t
     if actions.ndim == 3:
         state_offset = state_offset.unsqueeze(-2)
     actions = actions.clone()
-    actions[..., :dims] += state_offset
+    actions[..., :dims] = actions[..., :dims] + state_offset
     return actions
 
 
