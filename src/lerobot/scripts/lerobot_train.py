@@ -175,7 +175,11 @@ def update_policy(
         grad_norm = torch.tensor(float("nan"))
 
     train_metrics.loss = loss.item() * max(1, accum_steps)
-    train_metrics.grad_norm = grad_norm.item()
+    # 梯度累积下只有同步步（is_sync_step）才有真实 grad_norm，其余 micro-step 是 nan。
+    # 一律写入会让整段日志窗口的平均值变成 nan（T03 的四个 π0.5 run 因此全是 `grdn:nan`，
+    # 2026-10-17 查清：只是日志假象，裁剪本身在 line 155 每步都正常执行）。所以只在同步步写。
+    if is_sync_step or accum_steps == 1:
+        train_metrics.grad_norm = grad_norm.item()
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
     if torch.cuda.is_available():
